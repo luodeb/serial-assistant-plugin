@@ -1,12 +1,34 @@
 use crate::config::{DataFormat, FlowControl, Parity, SerialConfig};
-use crate::error::{connection_failed, send_failed, SerialError, SerialResult};
+use crate::error::{connection_failed, SerialError, SerialResult};
 
 use plugin_interfaces::{log_debug, log_info};
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, RwLock, Mutex};
 use tokio_serial::{SerialPortBuilderExt, SerialStream};
+use std::sync::Arc;
+use tokio::io::AsyncReadExt;
+
+/// 串口命令枚举
+#[derive(Debug)]
+pub enum SerialCommand {
+    Connect(SerialConfig),
+    Disconnect,
+    SendData(Vec<u8>, DataFormat),
+    StartReading,
+}
+
+/// 串口响应枚举
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub enum SerialResponse {
+    Connected(bool, String),
+    Disconnected,
+    DataSent(bool, usize, String),
+    DataReceived(Vec<u8>),
+    ReadError(String),
+}
 
 /// 串口连接状态
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,29 +92,32 @@ pub struct SerialClient {
     config: RwLock<SerialConfig>,
     /// 连接状态
     status: RwLock<ConnectionStatus>,
-    /// 串口流
-    stream: RwLock<Option<SerialStream>>,
     /// 统计信息
     statistics: RwLock<Statistics>,
-    /// 数据接收通道
-    data_receiver: RwLock<Option<mpsc::Receiver<DataPacket>>>,
-    /// 数据发送通道
-    data_sender: RwLock<Option<mpsc::Sender<DataPacket>>>,
     /// 连接开始时间
     connection_start: RwLock<Option<Instant>>,
+    /// 命令发送通道
+    pub command_sender: RwLock<Option<mpsc::UnboundedSender<SerialCommand>>>,
+    /// 数据接收通道
+    pub data_receiver: Arc<Mutex<Option<mpsc::UnboundedReceiver<SerialResponse>>>>,
+    /// 后台任务句柄
+    task_handle: RwLock<Option<tokio::task::JoinHandle<()>>>,
 }
 
-impl SerialClient {
-    /// 创建新的串口客户端
+/// 线程安全标记
+unsafe impl Send for SerialClient {}
+unsafe impl Sync for SerialClient {}
+
+impl SerialClient {    /// 创建新的串口客户端
     pub fn new() -> Self {
         Self {
             config: RwLock::new(SerialConfig::default()),
             status: RwLock::new(ConnectionStatus::Disconnected),
-            stream: RwLock::new(None),
             statistics: RwLock::new(Statistics::new()),
-            data_receiver: RwLock::new(None),
-            data_sender: RwLock::new(None),
             connection_start: RwLock::new(None),
+            command_sender: RwLock::new(None),
+            data_receiver: Arc::new(Mutex::new(None)),
+            task_handle: RwLock::new(None),
         }
     }
 
@@ -125,12 +150,112 @@ impl SerialClient {
                     _ => None,
                 },
             })
-            .collect();
+            .collect();        Ok(port_infos)
+    }    /// 后台串口任务处理器
+    async fn serial_task_handler(
+        mut command_rx: mpsc::UnboundedReceiver<SerialCommand>,
+        data_tx: mpsc::UnboundedSender<SerialResponse>,
+    ) {
+        let mut stream: Option<SerialStream> = None;
+        let mut _current_config = SerialConfig::default();
+        let mut should_read = false;
 
-        Ok(port_infos)
+        loop {
+            tokio::select! {
+                // 处理命令
+                command = command_rx.recv() => {
+                    match command {
+                        Some(SerialCommand::Connect(new_config)) => {
+                            let result = Self::create_serial_stream_blocking(&new_config).await;
+                            match result {
+                                Ok(new_stream) => {
+                                    stream = Some(new_stream);
+                                    _current_config = new_config;
+                                    let _ = data_tx.send(SerialResponse::Connected(true, "连接成功".to_string()));
+                                }
+                                Err(e) => {
+                                    let _ = data_tx.send(SerialResponse::Connected(false, e.to_string()));
+                                }
+                            }
+                        }
+                        Some(SerialCommand::Disconnect) => {
+                            should_read = false;
+                            stream = None;
+                            let _ = data_tx.send(SerialResponse::Disconnected);
+                        }
+                        Some(SerialCommand::SendData(data, _format)) => {
+                            if let Some(ref mut s) = stream {
+                                match s.write_all(&data).await {
+                                    Ok(_) => {
+                                        let _ = data_tx.send(SerialResponse::DataSent(true, data.len(), "发送成功".to_string()));
+                                    }
+                                    Err(e) => {
+                                        let _ = data_tx.send(SerialResponse::DataSent(false, 0, e.to_string()));
+                                    }
+                                }
+                            } else {
+                                let _ = data_tx.send(SerialResponse::DataSent(false, 0, "未连接".to_string()));
+                            }
+                        }
+                        Some(SerialCommand::StartReading) => {
+                            should_read = true;
+                        }
+                        None => break,
+                    }
+                }
+                // 读取数据
+                _ = async {
+                    if should_read && stream.is_some() {
+                        if let Some(ref mut s) = stream {
+                            let mut buffer = [0u8; 512];
+                            match s.read(&mut buffer).await {
+                                Ok(0) => {
+                                    // 连接关闭
+                                    let _ = data_tx.send(SerialResponse::ReadError("连接已关闭".to_string()));
+                                    should_read = false;
+                                }
+                                Ok(n) => {
+                                    // 成功读取数据
+                                    let data = buffer[..n].to_vec();
+                                    let _ = data_tx.send(SerialResponse::DataReceived(data));
+                                }
+                                Err(e) => {
+                                    // 读取错误
+                                    let _ = data_tx.send(SerialResponse::ReadError(e.to_string()));
+                                    should_read = false;
+                                }
+                            }
+                        }
+                    } else {
+                        // 避免忙等待
+                        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                    }
+                }, if should_read && stream.is_some() => {}
+            }
+        }
     }
 
-    /// 连接到串口
+    /// 创建串口流的阻塞版本
+    async fn create_serial_stream_blocking(config: &SerialConfig) -> SerialResult<SerialStream> {
+        let port_name = config.port.clone();
+        let baud_rate = config.baud_rate;
+        let data_bits = convert_data_bits(config.data_bits)?;
+        let stop_bits = convert_stop_bits(config.stop_bits)?;
+        let parity = convert_parity(&config.parity)?;
+        let flow_control = convert_flow_control(&config.flow_control)?;
+
+        tokio::task::spawn_blocking(move || {
+            tokio_serial::new(port_name, baud_rate)
+                .data_bits(data_bits)
+                .stop_bits(stop_bits)
+                .parity(parity)
+                .flow_control(flow_control)
+                .open_native_async()
+        })
+        .await
+        .map_err(|_| SerialError::TaskCancelled)?
+        .map_err(|e| connection_failed(&config.port, &e.to_string()))
+    }    /// 连接到串口
     pub async fn connect(&self, config: SerialConfig) -> SerialResult<()> {
         // 更新状态为连接中
         *self.status.write().await = ConnectionStatus::Connecting;
@@ -138,72 +263,90 @@ impl SerialClient {
         // 验证配置
         self.validate_config(&config).await?;
 
-        // 尝试建立连接
-        let stream = self.create_serial_stream(&config).await?;
+        // 创建命令和数据通道
+        let (command_tx, command_rx) = mpsc::unbounded_channel();
+        let (data_tx, data_rx) = mpsc::unbounded_channel();
 
-        // 保存配置和连接
-        *self.config.write().await = config;
-        *self.stream.write().await = Some(stream);
-        *self.status.write().await = ConnectionStatus::Connected;
-        *self.connection_start.write().await = Some(Instant::now());
+        // 启动后台任务
+        let task_handle = tokio::spawn(Self::serial_task_handler(command_rx, data_tx));
+        *self.task_handle.write().await = Some(task_handle);
+        *self.command_sender.write().await = Some(command_tx.clone());
+        *self.data_receiver.lock().await = Some(data_rx);
 
-        // 启动数据接收任务
-        self.start_data_receiver().await?;
+        // 发送连接命令
+        command_tx.send(SerialCommand::Connect(config.clone()))
+            .map_err(|_| SerialError::ChannelError("发送连接命令失败".to_string()))?;
 
-        log_info!("串口连接成功: {}", self.config.read().await.port);
-        Ok(())
-    }
-
-    /// 断开连接
+        // 等待连接结果
+        if let Some(receiver) = self.data_receiver.lock().await.as_mut() {
+            if let Some(response) = receiver.recv().await {
+                match response {
+                    SerialResponse::Connected(success, message) => {
+                        if success {
+                            *self.config.write().await = config;
+                            *self.status.write().await = ConnectionStatus::Connected;
+                            *self.connection_start.write().await = Some(Instant::now());
+                            log_info!("串口连接成功: {}", self.config.read().await.port);
+                            Ok(())
+                        } else {
+                            *self.status.write().await = ConnectionStatus::Error(message.clone());
+                            Err(SerialError::ConnectionFailed(message))
+                        }
+                    }
+                    _ => Err(SerialError::ChannelError("收到意外响应".to_string()))
+                }
+            } else {
+                Err(SerialError::ChannelError("未收到连接响应".to_string()))
+            }
+        } else {
+            Err(SerialError::ChannelError("数据接收通道未初始化".to_string()))
+        }
+    }    /// 断开连接
     pub async fn disconnect(&self) -> SerialResult<()> {
-        // 清理连接
-        *self.stream.write().await = None;
+        // 发送断开命令
+        if let Some(command_sender) = self.command_sender.read().await.as_ref() {
+            let _ = command_sender.send(SerialCommand::Disconnect);
+        }
+
+        // 等待后台任务完成
+        if let Some(handle) = self.task_handle.write().await.take() {
+            let _ = handle.await;
+        }
+
+        // 清理状态
         *self.status.write().await = ConnectionStatus::Disconnected;
         *self.connection_start.write().await = None;
-
-        // 关闭数据通道
-        *self.data_receiver.write().await = None;
-        *self.data_sender.write().await = None;
+        *self.command_sender.write().await = None;
+        *self.data_receiver.lock().await = None;
 
         log_info!("串口连接已断开");
         Ok(())
+    }/// 发送数据
+    pub async fn send_data(&self, data: &[u8], format: DataFormat) -> SerialResult<()> {
+        if let Some(command_sender) = self.command_sender.read().await.as_ref() {
+            // 发送数据命令
+            command_sender.send(SerialCommand::SendData(data.to_vec(), format.clone()))
+                .map_err(|_| SerialError::ChannelError("发送数据命令失败".to_string()))?;
+
+            // 更新发送统计信息
+            let mut stats = self.statistics.write().await;
+            stats.bytes_sent += data.len() as u64;
+            stats.packets_sent += 1;
+            stats.last_activity = Some(Instant::now());
+            
+            log_debug!("发送数据: {} 字节", data.len());
+            Ok(())
+        } else {
+            Err(SerialError::ConnectionFailed("未建立连接".to_string()))
+        }
     }
 
-    /// 发送数据
-    pub async fn send_data(&self, data: &[u8], format: DataFormat) -> SerialResult<()> {
-        let mut stream_guard = self.stream.write().await;
-        let stream = stream_guard
-            .as_mut()
-            .ok_or_else(|| SerialError::ConnectionFailed("未建立连接".to_string()))?;
-
-        // 发送数据
-        stream
-            .write_all(data)
-            .await
-            .map_err(|e| send_failed(data.len(), &e.to_string()))?;
-
-        // 更新统计信息
+    /// 更新接收统计信息
+    pub async fn update_receive_statistics(&self, bytes_count: usize) {
         let mut stats = self.statistics.write().await;
-        stats.bytes_sent += data.len() as u64;
-        stats.packets_sent += 1;
+        stats.bytes_received += bytes_count as u64;
+        stats.packets_received += 1;
         stats.last_activity = Some(Instant::now());
-
-        // 创建数据包记录
-        let packet = DataPacket {
-            timestamp: chrono::Utc::now().to_rfc3339(),
-            direction: DataDirection::Sent,
-            data: data.to_vec(),
-            format: format.clone(),
-            display_text: self.format_data_for_display(data, &format),
-        };
-
-        // 发送到数据通道
-        if let Some(sender) = self.data_sender.read().await.as_ref() {
-            let _ = sender.send(packet).await;
-        }
-
-        log_debug!("发送数据: {} 字节", data.len());
-        Ok(())
     }
 
     /// 验证配置
@@ -233,59 +376,7 @@ impl SerialClient {
         }
 
         Ok(())
-    }
-
-    /// 创建串口流
-    async fn create_serial_stream(&self, config: &SerialConfig) -> SerialResult<SerialStream> {
-        let port_name = config.port.clone();
-        let baud_rate = config.baud_rate;
-        let data_bits = convert_data_bits(config.data_bits)?;
-        let stop_bits = convert_stop_bits(config.stop_bits)?;
-        let parity = convert_parity(&config.parity)?;
-        let flow_control = convert_flow_control(&config.flow_control)?;
-
-        tokio::task::spawn_blocking(move || {
-            tokio_serial::new(port_name, baud_rate)
-                .data_bits(data_bits)
-                .stop_bits(stop_bits)
-                .parity(parity)
-                .flow_control(flow_control)
-                .open_native_async()
-        })
-        .await
-        .map_err(|_| SerialError::TaskCancelled)?
-        .map_err(|e| connection_failed(&config.port, &e.to_string()))
-    }
-
-    /// 启动数据接收任务
-    async fn start_data_receiver(&self) -> SerialResult<()> {
-        let (tx, rx) = mpsc::channel(1000);
-        *self.data_receiver.write().await = Some(rx);
-        *self.data_sender.write().await = Some(tx.clone());
-
-        // 这里需要实现实际的数据接收逻辑
-        // 由于需要访问 stream，这部分需要进一步实现
-
-        Ok(())
-    }
-
-    /// 格式化数据用于显示
-    fn format_data_for_display(&self, data: &[u8], format: &DataFormat) -> String {
-        match format {
-            DataFormat::Text => String::from_utf8_lossy(data).to_string(),
-            DataFormat::Hex => data
-                .iter()
-                .map(|b| format!("{:02X}", b))
-                .collect::<Vec<_>>()
-                .join(" "),
-            DataFormat::Binary => data
-                .iter()
-                .map(|b| format!("{:08b}", b))
-                .collect::<Vec<_>>()
-                .join(" "),
-        }
-    }
-}
+    }}
 
 impl Statistics {
     pub fn new() -> Self {
@@ -297,6 +388,36 @@ impl Statistics {
             errors_count: 0,
             connection_time: None,
             last_activity: None,
+        }
+    }
+}
+
+/// 根据指定格式格式化接收到的数据
+pub fn format_received_data(bytes: &[u8], format: &DataFormat) -> String {
+    match format {
+        DataFormat::Text => {
+            String::from_utf8_lossy(bytes)
+                .chars()
+                .map(|c| {
+                    if c.is_control() && c != '\n' && c != '\r' && c != '\t' {
+                        format!("\\x{:02x}", c as u8)
+                    } else {
+                        c.to_string()
+                    }
+                })
+                .collect()
+        }
+        DataFormat::Hex => {
+            bytes.iter()
+                .map(|b| format!("{:02X}", b))
+                .collect::<Vec<String>>()
+                .join(" ")
+        }
+        DataFormat::Binary => {
+            bytes.iter()
+                .map(|b| format!("{:08b}", b))
+                .collect::<Vec<String>>()
+                .join(" ")
         }
     }
 }

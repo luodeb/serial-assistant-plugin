@@ -63,8 +63,11 @@ pub struct UiConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DataConfig {
     pub format: DataFormat,
+    pub send_format: DataFormat,
+    pub receive_format: DataFormat,
     pub encoding: String,
     pub auto_send_interval: u64,
+    pub auto_add_crlf: bool,
 }
 
 /// 数据格式
@@ -139,11 +142,13 @@ pub fn create_default_user_config() -> UserConfig {
             auto_scroll: true,
             timestamp: true,
             max_lines: 1000,
-        },
-        data: DataConfig {
+        },        data: DataConfig {
             format: DataFormat::Hex,
+            send_format: DataFormat::Hex,
+            receive_format: DataFormat::Hex,
             encoding: "UTF-8".to_string(),
             auto_send_interval: 0,
+            auto_add_crlf: false,
         },
         advanced: AdvancedConfig {
             read_timeout: 1000,

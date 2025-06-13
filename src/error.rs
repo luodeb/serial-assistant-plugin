@@ -11,10 +11,6 @@ pub enum SerialError {
     #[error("串口配置无效: {0}")]
     InvalidConfiguration(String),
 
-    /// 数据发送错误
-    #[error("数据发送失败: {0}")]
-    SendFailed(String),
-
     /// 端口枚举错误
     #[error("端口枚举失败: {0}")]
     PortEnumerationFailed(String),
@@ -29,11 +25,13 @@ pub enum SerialError {
 
     /// 串口库错误
     #[error("串口库错误: {0}")]
-    SerialPortError(#[from] serialport::Error),
-
-    /// 任务取消错误
+    SerialPortError(#[from] serialport::Error),    /// 任务取消错误
     #[error("任务被取消")]
     TaskCancelled,
+
+    /// 通道通信错误
+    #[error("通道通信失败: {0}")]
+    ChannelError(String),
 
     /// 插件错误
     #[error("插件错误: {0}")]
@@ -54,16 +52,15 @@ pub struct ErrorResponse {
 
 impl From<SerialError> for ErrorResponse {
     fn from(error: SerialError) -> Self {
-        Self {
-            error_type: match &error {
+        Self {            error_type: match &error {
                 SerialError::ConnectionFailed(_) => "connection_failed",
                 SerialError::InvalidConfiguration(_) => "invalid_configuration",
-                SerialError::SendFailed(_) => "send_failed",
                 SerialError::PortEnumerationFailed(_) => "port_enumeration_failed",
                 SerialError::IoError(_) => "io_error",
                 SerialError::SerializationError(_) => "serialization_error",
                 SerialError::SerialPortError(_) => "serial_port_error",
                 SerialError::TaskCancelled => "task_cancelled",
+                SerialError::ChannelError(_) => "channel_error",
                 SerialError::PluginError(_) => "plugin_error",
             }
             .to_string(),
@@ -77,9 +74,4 @@ impl From<SerialError> for ErrorResponse {
 /// 创建连接失败错误
 pub fn connection_failed(port: &str, reason: &str) -> SerialError {
     SerialError::ConnectionFailed(format!("端口 {} - {}", port, reason))
-}
-
-/// 创建数据发送错误
-pub fn send_failed(data_length: usize, reason: &str) -> SerialError {
-    SerialError::SendFailed(format!("发送 {} 字节数据失败: {}", data_length, reason))
 }

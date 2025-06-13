@@ -31,11 +31,12 @@ pub struct SerialDebugAssistant {
     is_connected: Arc<Mutex<bool>>,
     /// Tokio运行时
     runtime: Option<Arc<Runtime>>,
+    /// 自动添加回车换行符开关
+    auto_add_crlf: bool,
 }
 
 impl SerialDebugAssistant {
-    fn new() -> Self {
-        Self {
+    fn new() -> Self {        Self {
             config: Arc::new(Mutex::new(load_user_config().unwrap_or_else(|_| {
                 log_warn!("Failed to load user config, using default");
                 create_default_user_config()
@@ -45,6 +46,7 @@ impl SerialDebugAssistant {
             selected_port: None,
             is_connected: Arc::new(Mutex::new(false)),
             runtime: None,
+            auto_add_crlf: false,
         }
     }
 
@@ -60,9 +62,7 @@ impl SerialDebugAssistant {
                 Vec::new()
             }
         }
-    }
-
-    /// 连接串口
+    }    /// 连接串口
     async fn connect_serial(&self, plugin_ctx: &PluginInstanceContext) -> Result<(), SerialError> {
         if let Some(port_name) = &self.selected_port {
             let config = self.config.lock().await;
@@ -76,6 +76,15 @@ impl SerialDebugAssistant {
                 Ok(_) => {
                     *self.is_connected.lock().await = true;
                     plugin_ctx.send_message_to_frontend(&format!("串口连接成功: {}", port_name));
+                      // 启动数据监听任务
+                    let self_clone = self.clone();
+                    let plugin_ctx_clone = plugin_ctx.clone();
+                    if let Some(runtime) = &self.runtime {
+                        runtime.spawn(async move {
+                            let _ = self_clone.start_data_listening(plugin_ctx_clone).await;
+                        });
+                    }
+                    
                     plugin_ctx.refresh_ui();
                     Ok(())
                 }
@@ -110,14 +119,18 @@ impl SerialDebugAssistant {
         if !*self.is_connected.lock().await {
             plugin_ctx.send_message_to_frontend("请先连接串口");
             return;
-        }
-
-        let config = self.config.lock().await;
-        let data_format = &config.data.format;
-
-        // 根据格式转换数据
+        }        let config = self.config.lock().await;
+        let data_format = &config.data.send_format;
+        let auto_add_crlf = config.data.auto_add_crlf;        // 根据格式转换数据
         let bytes = match data_format {
-            DataFormat::Text => data.as_bytes().to_vec(),
+            DataFormat::Text => {
+                let mut text_bytes = data.as_bytes().to_vec();
+                // 如果启用自动添加回车换行符且是文本模式，则添加\r\n
+                if auto_add_crlf {
+                    text_bytes.extend_from_slice(b"\r\n");
+                }
+                text_bytes
+            }
             DataFormat::Hex => {
                 // 解析十六进制字符串
                 hex_to_bytes(data).unwrap_or_else(|_| {
@@ -137,11 +150,10 @@ impl SerialDebugAssistant {
         if !bytes.is_empty() {
             match self.client.send_data(&bytes, data_format.clone()).await {
                 Ok(_) => {
-                    plugin_ctx
-                        .send_message_to_frontend(&format!("发送数据成功: {} 字节", bytes.len()));
+                    log_info!("发送数据成功: {}", data);
                 }
                 Err(e) => {
-                    plugin_ctx.send_message_to_frontend(&format!("发送数据失败: {}", e));
+                    log_warn!("发送数据失败: {}", e);
                 }
             }
         }
@@ -153,11 +165,62 @@ impl SerialDebugAssistant {
         if let Err(e) = save_user_config(&config) {
             log_warn!("保存配置失败: {}", e);
         }
+    }    /// 启动数据监听任务
+    async fn start_data_listening(&self, plugin_ctx: PluginInstanceContext) -> Result<(), SerialError> {
+        // 启动读取命令
+        if let Some(command_sender) = self.client.command_sender.read().await.as_ref() {
+            let _ = command_sender.send(crate::serial_client::SerialCommand::StartReading);
+        }
+
+        // 持续监听数据接收通道
+        loop {
+            if let Some(receiver) = self.client.data_receiver.lock().await.as_mut() {
+                match receiver.recv().await {
+                    Some(crate::serial_client::SerialResponse::DataReceived(data)) => {
+                        self.format_and_display_received_data(data, &plugin_ctx).await;
+                    }
+                    Some(crate::serial_client::SerialResponse::ReadError(error)) => {
+                        plugin_ctx.send_message_to_frontend(&format!("读取错误: {}", error));
+                        break;
+                    }
+                    None => {
+                        // 通道关闭
+                        break;
+                    }
+                    _ => {
+                        // 忽略其他响应类型
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// 格式化并显示接收到的数据
+    async fn format_and_display_received_data(&self, data: Vec<u8>, plugin_ctx: &PluginInstanceContext) {
+        let config = self.config.lock().await;
+        let receive_format = &config.data.receive_format;
+        
+        // 使用现有的格式化函数
+        let formatted_data = crate::serial_client::format_received_data(&data, receive_format);
+        
+          // 发送到前端显示
+        plugin_ctx.send_message_to_frontend(&formatted_data);
+        
+        // 更新统计信息
+        self.client.update_receive_statistics(data.len()).await;
+        log_info!("接收到数据: {} 字节", data.len());
     }
 }
 
-impl PluginHandler for SerialDebugAssistant {
-    fn update_ui(&mut self, _ctx: &Context, ui: &mut Ui, _plugin_ctx: &PluginInstanceContext) {
+impl PluginHandler for SerialDebugAssistant {    fn update_ui(&mut self, _ctx: &Context, ui: &mut Ui, _plugin_ctx: &PluginInstanceContext) {
+        // 同步配置中的开关状态到UI
+        if let Ok(config) = self.config.try_lock() {
+            self.auto_add_crlf = config.data.auto_add_crlf;
+        }
+
         ui.label("串口调试助手");
 
         // 端口选择区域
@@ -258,25 +321,62 @@ impl PluginHandler for SerialDebugAssistant {
                     }
                 }
             });
+        }        ui.label(""); // 空行
+
+        // 数据格式配置区域
+        if let Ok(mut config) = self.config.try_lock() {
+            ui.horizontal(|ui| {
+                ui.label("发送模式:");
+                let format_options = vec!["TEXT".to_string(), "HEX".to_string(), "BIN".to_string()];
+                let mut send_format_selected = Some(match config.data.send_format {
+                    DataFormat::Text => "TEXT".to_string(),
+                    DataFormat::Hex => "HEX".to_string(),
+                    DataFormat::Binary => "BIN".to_string(),
+                });
+
+                let send_format_response = ui.combo_box(format_options.clone(), &mut send_format_selected, "选择发送格式");
+                if send_format_response.clicked() {
+                    if let Some(selected) = &send_format_selected {
+                        config.data.send_format = match selected.as_str() {
+                            "TEXT" => DataFormat::Text,
+                            "BIN" => DataFormat::Binary,
+                            _ => DataFormat::Hex,
+                        };
+                        log_info!("发送格式改为: {:?}", config.data.send_format);
+                    }
+                }
+            });
+
+            ui.horizontal(|ui| {
+                ui.label("接收模式:");
+                let format_options = vec!["TEXT".to_string(), "HEX".to_string(), "BIN".to_string()];
+                let mut receive_format_selected = Some(match config.data.receive_format {
+                    DataFormat::Text => "TEXT".to_string(),
+                    DataFormat::Hex => "HEX".to_string(),
+                    DataFormat::Binary => "BIN".to_string(),
+                });
+
+                let receive_format_response = ui.combo_box(format_options, &mut receive_format_selected, "选择接收格式");
+                if receive_format_response.clicked() {
+                    if let Some(selected) = &receive_format_selected {
+                        config.data.receive_format = match selected.as_str() {
+                            "TEXT" => DataFormat::Text,
+                            "BIN" => DataFormat::Binary,
+                            _ => DataFormat::Hex,
+                        };                        log_info!("接收格式改为: {:?}", config.data.receive_format);
+                    }
+                }
+            });
+
+            ui.horizontal(|ui| {
+                ui.label("自动添加\\r\\n:");
+                let toggle_response = ui.toggle(&mut self.auto_add_crlf);
+                if toggle_response.clicked() {
+                    config.data.auto_add_crlf = self.auto_add_crlf;
+                    log_info!("自动添加\\r\\n开关改为: {}", self.auto_add_crlf);
+                }
+            });
         }
-
-        ui.label(""); // 空行
-
-        // 显示连接状态
-        let is_connected = self
-            .is_connected
-            .try_lock()
-            .map(|guard| *guard)
-            .unwrap_or(false);
-
-        ui.label(&format!(
-            "连接状态: {}",
-            if is_connected {
-                "已连接"
-            } else {
-                "未连接"
-            }
-        ));
 
         // 刷新端口按钮
         if ui.button("刷新端口").clicked() {
@@ -399,8 +499,6 @@ impl PluginHandler for SerialDebugAssistant {
         message: &str,
         plugin_ctx: &PluginInstanceContext,
     ) -> Result<String, Box<dyn std::error::Error>> {
-        let metadata = plugin_ctx.get_metadata();
-        log_info!("[{}] 收到消息: {}", metadata.name, message);
 
         // 如果串口已连接，将消息作为数据发送
         let is_connected = self

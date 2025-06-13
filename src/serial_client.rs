@@ -3,12 +3,12 @@ use crate::error::{connection_failed, SerialError, SerialResult};
 
 use plugin_interfaces::{log_debug, log_info};
 use serde::{Deserialize, Serialize};
-use std::time::{Duration, Instant};
-use tokio::io::AsyncWriteExt;
-use tokio::sync::{mpsc, RwLock, Mutex};
-use tokio_serial::{SerialPortBuilderExt, SerialStream};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
+use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio_serial::{SerialPortBuilderExt, SerialStream};
 
 /// 串口命令枚举
 #[derive(Debug)]
@@ -108,7 +108,8 @@ pub struct SerialClient {
 unsafe impl Send for SerialClient {}
 unsafe impl Sync for SerialClient {}
 
-impl SerialClient {    /// 创建新的串口客户端
+impl SerialClient {
+    /// 创建新的串口客户端
     pub fn new() -> Self {
         Self {
             config: RwLock::new(SerialConfig::default()),
@@ -150,8 +151,10 @@ impl SerialClient {    /// 创建新的串口客户端
                     _ => None,
                 },
             })
-            .collect();        Ok(port_infos)
-    }    /// 后台串口任务处理器
+            .collect();
+        Ok(port_infos)
+    }
+    /// 后台串口任务处理器
     async fn serial_task_handler(
         mut command_rx: mpsc::UnboundedReceiver<SerialCommand>,
         data_tx: mpsc::UnboundedSender<SerialResponse>,
@@ -255,7 +258,8 @@ impl SerialClient {    /// 创建新的串口客户端
         .await
         .map_err(|_| SerialError::TaskCancelled)?
         .map_err(|e| connection_failed(&config.port, &e.to_string()))
-    }    /// 连接到串口
+    }
+    /// 连接到串口
     pub async fn connect(&self, config: SerialConfig) -> SerialResult<()> {
         // 更新状态为连接中
         *self.status.write().await = ConnectionStatus::Connecting;
@@ -274,7 +278,8 @@ impl SerialClient {    /// 创建新的串口客户端
         *self.data_receiver.lock().await = Some(data_rx);
 
         // 发送连接命令
-        command_tx.send(SerialCommand::Connect(config.clone()))
+        command_tx
+            .send(SerialCommand::Connect(config.clone()))
             .map_err(|_| SerialError::ChannelError("发送连接命令失败".to_string()))?;
 
         // 等待连接结果
@@ -293,15 +298,18 @@ impl SerialClient {    /// 创建新的串口客户端
                             Err(SerialError::ConnectionFailed(message))
                         }
                     }
-                    _ => Err(SerialError::ChannelError("收到意外响应".to_string()))
+                    _ => Err(SerialError::ChannelError("收到意外响应".to_string())),
                 }
             } else {
                 Err(SerialError::ChannelError("未收到连接响应".to_string()))
             }
         } else {
-            Err(SerialError::ChannelError("数据接收通道未初始化".to_string()))
+            Err(SerialError::ChannelError(
+                "数据接收通道未初始化".to_string(),
+            ))
         }
-    }    /// 断开连接
+    }
+    /// 断开连接
     pub async fn disconnect(&self) -> SerialResult<()> {
         // 发送断开命令
         if let Some(command_sender) = self.command_sender.read().await.as_ref() {
@@ -321,11 +329,13 @@ impl SerialClient {    /// 创建新的串口客户端
 
         log_info!("串口连接已断开");
         Ok(())
-    }/// 发送数据
+    }
+    /// 发送数据
     pub async fn send_data(&self, data: &[u8], format: DataFormat) -> SerialResult<()> {
         if let Some(command_sender) = self.command_sender.read().await.as_ref() {
             // 发送数据命令
-            command_sender.send(SerialCommand::SendData(data.to_vec(), format.clone()))
+            command_sender
+                .send(SerialCommand::SendData(data.to_vec(), format.clone()))
                 .map_err(|_| SerialError::ChannelError("发送数据命令失败".to_string()))?;
 
             // 更新发送统计信息
@@ -333,7 +343,7 @@ impl SerialClient {    /// 创建新的串口客户端
             stats.bytes_sent += data.len() as u64;
             stats.packets_sent += 1;
             stats.last_activity = Some(Instant::now());
-            
+
             log_debug!("发送数据: {} 字节", data.len());
             Ok(())
         } else {
@@ -376,7 +386,8 @@ impl SerialClient {    /// 创建新的串口客户端
         }
 
         Ok(())
-    }}
+    }
+}
 
 impl Statistics {
     pub fn new() -> Self {
@@ -395,30 +406,26 @@ impl Statistics {
 /// 根据指定格式格式化接收到的数据
 pub fn format_received_data(bytes: &[u8], format: &DataFormat) -> String {
     match format {
-        DataFormat::Text => {
-            String::from_utf8_lossy(bytes)
-                .chars()
-                .map(|c| {
-                    if c.is_control() && c != '\n' && c != '\r' && c != '\t' {
-                        format!("\\x{:02x}", c as u8)
-                    } else {
-                        c.to_string()
-                    }
-                })
-                .collect()
-        }
-        DataFormat::Hex => {
-            bytes.iter()
-                .map(|b| format!("{:02X}", b))
-                .collect::<Vec<String>>()
-                .join(" ")
-        }
-        DataFormat::Binary => {
-            bytes.iter()
-                .map(|b| format!("{:08b}", b))
-                .collect::<Vec<String>>()
-                .join(" ")
-        }
+        DataFormat::Text => String::from_utf8_lossy(bytes)
+            .chars()
+            .map(|c| {
+                if c.is_control() && c != '\n' && c != '\r' && c != '\t' {
+                    format!("\\x{:02x}", c as u8)
+                } else {
+                    c.to_string()
+                }
+            })
+            .collect(),
+        DataFormat::Hex => bytes
+            .iter()
+            .map(|b| format!("{:02X}", b))
+            .collect::<Vec<String>>()
+            .join(" "),
+        DataFormat::Binary => bytes
+            .iter()
+            .map(|b| format!("{:08b}", b))
+            .collect::<Vec<String>>()
+            .join(" "),
     }
 }
 

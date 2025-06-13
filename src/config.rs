@@ -142,7 +142,8 @@ pub fn create_default_user_config() -> UserConfig {
             auto_scroll: true,
             timestamp: true,
             max_lines: 1000,
-        },        data: DataConfig {
+        },
+        data: DataConfig {
             format: DataFormat::Hex,
             send_format: DataFormat::Hex,
             receive_format: DataFormat::Hex,

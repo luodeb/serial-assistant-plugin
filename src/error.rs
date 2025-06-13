@@ -25,7 +25,8 @@ pub enum SerialError {
 
     /// 串口库错误
     #[error("串口库错误: {0}")]
-    SerialPortError(#[from] serialport::Error),    /// 任务取消错误
+    SerialPortError(#[from] serialport::Error),
+    /// 任务取消错误
     #[error("任务被取消")]
     TaskCancelled,
 
@@ -52,7 +53,8 @@ pub struct ErrorResponse {
 
 impl From<SerialError> for ErrorResponse {
     fn from(error: SerialError) -> Self {
-        Self {            error_type: match &error {
+        Self {
+            error_type: match &error {
                 SerialError::ConnectionFailed(_) => "connection_failed",
                 SerialError::InvalidConfiguration(_) => "invalid_configuration",
                 SerialError::PortEnumerationFailed(_) => "port_enumeration_failed",

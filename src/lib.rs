@@ -36,7 +36,8 @@ pub struct SerialDebugAssistant {
 }
 
 impl SerialDebugAssistant {
-    fn new() -> Self {        Self {
+    fn new() -> Self {
+        Self {
             config: Arc::new(Mutex::new(load_user_config().unwrap_or_else(|_| {
                 log_warn!("Failed to load user config, using default");
                 create_default_user_config()
@@ -62,7 +63,8 @@ impl SerialDebugAssistant {
                 Vec::new()
             }
         }
-    }    /// 连接串口
+    }
+    /// 连接串口
     async fn connect_serial(&self, plugin_ctx: &PluginInstanceContext) -> Result<(), SerialError> {
         if let Some(port_name) = &self.selected_port {
             let config = self.config.lock().await;
@@ -76,7 +78,7 @@ impl SerialDebugAssistant {
                 Ok(_) => {
                     *self.is_connected.lock().await = true;
                     plugin_ctx.send_message_to_frontend(&format!("串口连接成功: {}", port_name));
-                      // 启动数据监听任务
+                    // 启动数据监听任务
                     let self_clone = self.clone();
                     let plugin_ctx_clone = plugin_ctx.clone();
                     if let Some(runtime) = &self.runtime {
@@ -84,7 +86,7 @@ impl SerialDebugAssistant {
                             let _ = self_clone.start_data_listening(plugin_ctx_clone).await;
                         });
                     }
-                    
+
                     plugin_ctx.refresh_ui();
                     Ok(())
                 }
@@ -119,9 +121,10 @@ impl SerialDebugAssistant {
         if !*self.is_connected.lock().await {
             plugin_ctx.send_message_to_frontend("请先连接串口");
             return;
-        }        let config = self.config.lock().await;
+        }
+        let config = self.config.lock().await;
         let data_format = &config.data.send_format;
-        let auto_add_crlf = config.data.auto_add_crlf;        // 根据格式转换数据
+        let auto_add_crlf = config.data.auto_add_crlf; // 根据格式转换数据
         let bytes = match data_format {
             DataFormat::Text => {
                 let mut text_bytes = data.as_bytes().to_vec();
@@ -165,8 +168,12 @@ impl SerialDebugAssistant {
         if let Err(e) = save_user_config(&config) {
             log_warn!("保存配置失败: {}", e);
         }
-    }    /// 启动数据监听任务
-    async fn start_data_listening(&self, plugin_ctx: PluginInstanceContext) -> Result<(), SerialError> {
+    }
+    /// 启动数据监听任务
+    async fn start_data_listening(
+        &self,
+        plugin_ctx: PluginInstanceContext,
+    ) -> Result<(), SerialError> {
         // 启动读取命令
         if let Some(command_sender) = self.client.command_sender.read().await.as_ref() {
             let _ = command_sender.send(crate::serial_client::SerialCommand::StartReading);
@@ -177,7 +184,8 @@ impl SerialDebugAssistant {
             if let Some(receiver) = self.client.data_receiver.lock().await.as_mut() {
                 match receiver.recv().await {
                     Some(crate::serial_client::SerialResponse::DataReceived(data)) => {
-                        self.format_and_display_received_data(data, &plugin_ctx).await;
+                        self.format_and_display_received_data(data, &plugin_ctx)
+                            .await;
                     }
                     Some(crate::serial_client::SerialResponse::ReadError(error)) => {
                         plugin_ctx.send_message_to_frontend(&format!("读取错误: {}", error));
@@ -199,23 +207,28 @@ impl SerialDebugAssistant {
     }
 
     /// 格式化并显示接收到的数据
-    async fn format_and_display_received_data(&self, data: Vec<u8>, plugin_ctx: &PluginInstanceContext) {
+    async fn format_and_display_received_data(
+        &self,
+        data: Vec<u8>,
+        plugin_ctx: &PluginInstanceContext,
+    ) {
         let config = self.config.lock().await;
         let receive_format = &config.data.receive_format;
-        
+
         // 使用现有的格式化函数
         let formatted_data = crate::serial_client::format_received_data(&data, receive_format);
-        
-          // 发送到前端显示
+
+        // 发送到前端显示
         plugin_ctx.send_message_to_frontend(&formatted_data);
-        
+
         // 更新统计信息
         self.client.update_receive_statistics(data.len()).await;
         log_info!("接收到数据: {} 字节", data.len());
     }
 }
 
-impl PluginHandler for SerialDebugAssistant {    fn update_ui(&mut self, _ctx: &Context, ui: &mut Ui, _plugin_ctx: &PluginInstanceContext) {
+impl PluginHandler for SerialDebugAssistant {
+    fn update_ui(&mut self, _ctx: &Context, ui: &mut Ui, _plugin_ctx: &PluginInstanceContext) {
         // 同步配置中的开关状态到UI
         if let Ok(config) = self.config.try_lock() {
             self.auto_add_crlf = config.data.auto_add_crlf;
@@ -321,7 +334,8 @@ impl PluginHandler for SerialDebugAssistant {    fn update_ui(&mut self, _ctx: &
                     }
                 }
             });
-        }        ui.label(""); // 空行
+        }
+        ui.label(""); // 空行
 
         // 数据格式配置区域
         if let Ok(mut config) = self.config.try_lock() {
@@ -334,7 +348,11 @@ impl PluginHandler for SerialDebugAssistant {    fn update_ui(&mut self, _ctx: &
                     DataFormat::Binary => "BIN".to_string(),
                 });
 
-                let send_format_response = ui.combo_box(format_options.clone(), &mut send_format_selected, "选择发送格式");
+                let send_format_response = ui.combo_box(
+                    format_options.clone(),
+                    &mut send_format_selected,
+                    "选择发送格式",
+                );
                 if send_format_response.clicked() {
                     if let Some(selected) = &send_format_selected {
                         config.data.send_format = match selected.as_str() {
@@ -356,14 +374,16 @@ impl PluginHandler for SerialDebugAssistant {    fn update_ui(&mut self, _ctx: &
                     DataFormat::Binary => "BIN".to_string(),
                 });
 
-                let receive_format_response = ui.combo_box(format_options, &mut receive_format_selected, "选择接收格式");
+                let receive_format_response =
+                    ui.combo_box(format_options, &mut receive_format_selected, "选择接收格式");
                 if receive_format_response.clicked() {
                     if let Some(selected) = &receive_format_selected {
                         config.data.receive_format = match selected.as_str() {
                             "TEXT" => DataFormat::Text,
                             "BIN" => DataFormat::Binary,
                             _ => DataFormat::Hex,
-                        };                        log_info!("接收格式改为: {:?}", config.data.receive_format);
+                        };
+                        log_info!("接收格式改为: {:?}", config.data.receive_format);
                     }
                 }
             });
@@ -499,7 +519,6 @@ impl PluginHandler for SerialDebugAssistant {    fn update_ui(&mut self, _ctx: &
         message: &str,
         plugin_ctx: &PluginInstanceContext,
     ) -> Result<String, Box<dyn std::error::Error>> {
-
         // 如果串口已连接，将消息作为数据发送
         let is_connected = self
             .is_connected

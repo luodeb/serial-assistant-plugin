@@ -1,0 +1,29 @@
+# 串口调试助手用户配置文件
+# 此文件保存用户可修改的设置，不包含插件描述信息
+
+[serial]
+# 默认串口配置
+port = ""               # 端口名称（如 COM1, /dev/ttyUSB0）
+baud_rate = 115200      # 波特率
+data_bits = 8           # 数据位
+stop_bits = 1           # 停止位
+parity = "None"         # 校验位: None, Even, Odd
+flow_control = "None"   # 流控制: None, Hardware, Software
+
+[ui]
+# UI相关配置
+auto_scroll = true      # 自动滚动
+timestamp = true        # 显示时间戳
+max_lines = 1000        # 最大显示行数
+
+[data]
+# 数据处理配置
+format = "Hex"          # 默认数据格式: Text, Hex, Binary
+encoding = "UTF-8"      # 文本编码
+auto_send_interval = 0  # 自动发送间隔(毫秒，0为禁用)
+
+[advanced]
+# 高级配置
+read_timeout = 1000     # 读取超时(毫秒)
+write_timeout = 1000    # 写入超时(毫秒)
+buffer_size = 4096      # 缓冲区大小

@@ -1,0 +1,49 @@
+[plugin]
+id = "serial-debug-assistant"
+version = "1.0.0"
+description = "串口调试助手插件，提供串口通信、数据收发、设备管理等功能"
+library = "serial_debug_assistant"
+disabled = false
+name = "Serial Debug Assistant"
+author = "Your Name"
+category = "example"
+tags = ["demo", "sample"]
+min_app_version = "0.1.0"
+require_history = false
+
+[connection]
+# 默认串口配置
+default_baud_rate = 115200
+default_data_bits = 8
+default_stop_bits = 1
+default_parity = "none"
+default_flow_control = "none"
+
+# 缓冲区设置
+read_buffer_size = 4096
+write_buffer_size = 1024
+
+# 超时设置 (毫秒)
+read_timeout = 1000
+write_timeout = 1000
+
+[data_format]
+# 支持的数据格式
+supported_formats = ["text", "hex", "binary"]
+default_format = "text"
+
+# 自动换行设置
+auto_newline = true
+newline_chars = "\r\n"
+
+[ui]
+# 界面设置
+auto_scroll = true
+max_display_lines = 1000
+timestamp_format = "yyyy-MM-dd HH:mm:ss.SSS"
+
+[logging]
+# 日志设置
+log_level = "info"
+log_to_file = true
+max_log_size = "10MB"

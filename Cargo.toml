@@ -1,0 +1,32 @@
+[package]
+name = "serial-debug-assistant"
+version = "1.0.0"
+edition = "2021"
+description = "串口调试助手插件"
+authors = ["Your Name"]
+
+[lib]
+name = "serial_debug_assistant"
+crate-type = ["cdylib"]
+
+[dependencies]
+# 串口通信库
+serialport = "4.7.2"
+tokio-serial = "5.4.5"
+
+# 核心依赖
+tokio = { version = "1.45.1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+
+# 插件接口
+plugin-interfaces = { git = "https://github.com/luodeb/plugin-interfaces.git" }
+
+# 错误处理
+anyhow = "1.0"
+thiserror = "1.0"
+
+[dev-dependencies]
+tokio-test = "0.4"

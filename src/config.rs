@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use std::fs;
+use std::path::PathBuf;
 
 /// 用户配置结构（来自 serial.toml）
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -86,14 +86,14 @@ pub struct AdvancedConfig {
 /// 加载用户配置文件
 pub fn load_user_config() -> Result<UserConfig, Box<dyn std::error::Error>> {
     let config_path = get_user_config_path()?;
-    
+
     // 如果配置文件不存在，创建默认配置
     if !config_path.exists() {
         let default_config = create_default_user_config();
         save_user_config(&default_config)?;
         return Ok(default_config);
     }
-    
+
     let content = fs::read_to_string(&config_path)?;
     let config: UserConfig = toml::from_str(&content)?;
     Ok(config)
@@ -102,12 +102,12 @@ pub fn load_user_config() -> Result<UserConfig, Box<dyn std::error::Error>> {
 /// 保存用户配置文件
 pub fn save_user_config(config: &UserConfig) -> Result<(), Box<dyn std::error::Error>> {
     let config_path = get_user_config_path()?;
-    
+
     // 确保目录存在
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    
+
     let content = toml::to_string_pretty(config)?;
     fs::write(&config_path, content)?;
     Ok(())

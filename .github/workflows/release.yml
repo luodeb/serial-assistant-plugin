@@ -109,6 +109,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential
+          sudo apt-get install libudev-dev
 
       - name: Rust setup
         uses: dtolnay/rust-toolchain@stable
